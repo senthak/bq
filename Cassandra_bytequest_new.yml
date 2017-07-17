@@ -1,0 +1,175 @@
+Parameters:
+  CDEnvironmentSize:
+    Type: String
+    Default: FREE
+    AllowedValues:
+      - FREE
+      - SMALL
+      - MEDIUM
+      - LARGE
+    Description: Select Environment Size (F,S,M,L)
+Mappings:
+  RegionMap:
+    us-east-1:
+      "RHELINUX" : "ami-b63769a1" # RHELINUX Oct 2016 RHEL-7.3_HVM_GA-20161026-x86_64-1-Hourly2-GP2 
+      AZ: us-east-1a
+    us-east-2:
+      "RHELINUX" : "ami-0932686c" # RHELINUX MAR 2017 RHEL-7.3_HVM_GA-20161026-x86_64-1-Hourly2-GP2
+      AZ: us-east-2a	  
+    us-west-1:
+      "RHELINUX" : "ami-2cade64c" # RHELINUX Oct 2016 RHEL-7.3_HVM_GA-20161026-x86_64-1-Hourly2-GP2
+      AZ: us-west-1a	  
+    us-west-2:
+      "RHELINUX" : "ami-6f68cf0f" # RHELINUX Oct 2016 RHEL-7.3_HVM_GA-20161026-x86_64-1-Hourly2-GP2
+      AZ: us-west-2a	  
+  InstanceSize:
+    FREE:
+      "EC2" : "t2.micro"
+    SMALL:
+      "EC2" : "t2.small"
+    MEDIUM:
+      "EC2" : "t2.medium"
+    LARGE:
+      "EC2" : "t2.large"  
+Resources:
+  Cassandra1:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", RHELINUX] # Dynamic mapping + Pseudo Parameter
+      AvailabilityZone: !FindInMap [RegionMap, !Ref "AWS::Region", AZ]
+      InstanceType: !FindInMap [InstanceSize, !Ref CDEnvironmentSize, EC2]
+      KeyName: MyOregonKeyPair
+      Tags:
+        - Key: Name
+          Value: cassandra_node1	  
+      Volumes:
+      - VolumeId:
+          Ref: NewVolume
+        Device: "/dev/sdk"
+      UserData:
+        "Fn::Base64":
+           Fn::Join:
+           - ''
+           - - "#!/bin/bash -xe\n"
+             - "### This is redhat 7. It supports cloud-init but Cfn packages need to be installed
+               unlike AWS Linux. And they are installed in a different location\n"
+             - "# First enable EPEL\n"
+             - rpm -Uvh https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+             - "\n"
+             - "# Now install Python Setuptools(easy_install) and Pip"
+             - "\n"
+             - yum -y install python-pip wget unzip
+             - "\n"
+             - "# Now install cfn scripts"
+             - "\n"
+             - "/usr/bin/easy_install --script-dir /opt/aws/bin https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz"
+             - "\n"
+             - "# Now fix the cfn-hup script and copy to init.d location as AWS does not do
+               it for you"
+             - "\n"
+             - cp -f `pip show aws-cfn-bootstrap 2> /dev/null | egrep  "^Location" | awk -F
+               ":" ' { print $2 }'`/init/redhat/cfn-hup /etc/init.d/
+             - "\n"
+             - chmod 755 /etc/init.d/cfn-hup
+             - "\n"
+             - chkconfig --add cfn-hup
+             - "\n"
+             - "mkdir -p /app \n"
+             - "mkfs -t ext4 /dev/xvdk \n"
+             - "mount /dev/xvdk /app \n"
+             - "mkdir -p /app/cassandra \n"
+             - yum update -y aws-cfn-bootstrap	
+             - "\n"
+             - "/opt/aws/bin/cfn-init -v "
+             - " --stack "
+             - Ref: AWS::StackName
+             - " --resource Cassandra1 "
+             - " --configsets casndra "
+             - " --region "
+             - Ref: AWS::Region
+             - "\n"
+             - yum update -y
+             - "\n"
+             - "/opt/aws/bin/cfn-signal -e $?"
+             - " --stack "
+             - Ref: AWS::StackName
+             - " --resource Cassandra1 "
+             - " --region "
+             - Ref: AWS::Region
+             - "\n"
+             - "/opt/aws/bin/cfn-signal -e $?"
+             - " --stack "
+             - Ref: AWS::StackName
+             - " --resource Cassandra1 "
+             - " --region "
+             - Ref: AWS::Region			 
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'
+        Timeout: PT20M			
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          casndra:
+            - "configure_cfn"
+            - "install_cassandra"
+        configure_cfn:
+          files:
+            /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.Cassandra1.Metadata.AWS::CloudFormation::Init
+                action=/usr/bin/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource Cassandra1 --configsets casndra --region ${AWS::Region}
+              mode: "000400"
+              owner: root
+              group: root
+            /etc/cfn/cfn-hup.conf:
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+                verbose=true
+                interval=5
+              mode: "000400"
+              owner: root
+              group: root
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: "true"
+                ensureRunning: "true"
+                files:
+                  - "/etc/cfn/cfn-hup.conf"
+                  - "/etc/cfn/hooks.d/cfn-auto-reloader.conf"
+        install_cassandra:
+          commands:
+            01_install:
+             cwd: "/home/ec2-user"
+             command: "wget --no-check-certificate --no-cookies --header \"Cookie: oraclelicense=accept-securebackup-cookie\" http://download.oracle.com/otn-pub/java/jdk/8u112-b15/jdk-8u112-linux-x64.rpm"
+            02_install:
+             cwd: "/home/ec2-user"
+             command: "wget http://www.apache.org/dist/cassandra/3.0.12/apache-cassandra-3.0.12-bin.tar.gz -P /app"
+            03_install:
+             cwd: "/home/ec2-user"
+             command: "rpm -Uvh jdk-8u112-linux-x64.rpm"
+            04_install:
+             cwd: "/app/cassandra"
+             command: "tar -zxvf /app/apache-cassandra-3.0.12-bin.tar.gz -C /app/cassandra"
+            05_install:
+             cwd: "/app/cassandra"
+             command: "cp /app/cassandra/apache-cassandra-3.0.12/conf/cassandra.yaml  /app/cassandra/apache-cassandra-3.0.12/conf/cassdandra.yaml.bak"
+            06_install:
+             cwd: "/home/ec2-user"
+             command: "wget https://github.com/senthak/bq/archive/testing.zip"
+            07_install:
+             cwd: "/home/ec2-user"
+             command: "unzip testing.zip"
+  NewVolume:
+    Type: AWS::EC2::Volume
+    Properties: 
+      Size: '20'
+      AvailabilityZone: !FindInMap [RegionMap, !Ref "AWS::Region", AZ] 
+      Tags:
+        - Key: Name
+          Value: cassandra1_vol
